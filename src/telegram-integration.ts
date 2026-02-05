@@ -91,7 +91,10 @@ export class TelegramIntegration {
 
         // Prepare media for processing
         const images = msg.mediaType === 'image' && msg.mediaData
-          ? [{ data: msg.mediaData, mediaType: 'image/jpeg' as const }]
+          ? [{
+              data: msg.mediaData,
+              mediaType: (msg.mediaMimeType || 'image/jpeg') as 'image/jpeg' | 'image/png'
+            }]
           : undefined;
 
         logger.info({

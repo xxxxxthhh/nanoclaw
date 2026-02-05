@@ -26,6 +26,18 @@ interface ContainerOutput {
   error?: string;
 }
 
+type VisionContent =
+  | { type: 'text'; text: string }
+  | { type: 'image'; source: { type: 'base64'; media_type: 'image/jpeg' | 'image/png'; data: string } };
+
+type StreamingUserMessage = {
+  type: 'user';
+  message: {
+    role: 'user';
+    content: VisionContent[] | string;
+  };
+};
+
 interface SessionEntry {
   sessionId: string;
   fullPath: string;
@@ -233,14 +245,13 @@ async function main(): Promise<void> {
     textPrompt = `[SCHEDULED TASK - You are running automatically, not in response to a user message. Use mcp__nanoclaw__send_message if needed to communicate with the user.]\n\n${input.prompt}`;
   }
 
-  // Save images to files and reference them in prompt
+  // Save images to files for debugging/inspection
   if (input.images && input.images.length > 0) {
     const imageDir = '/workspace/group/_images';
     if (!fs.existsSync(imageDir)) {
       fs.mkdirSync(imageDir, { recursive: true });
     }
 
-    const imagePaths: string[] = [];
     for (let i = 0; i < input.images.length; i++) {
       const img = input.images[i];
       const ext = img.mediaType === 'image/png' ? 'png' : 'jpg';
@@ -250,14 +261,9 @@ async function main(): Promise<void> {
       // Write base64 image to file
       const buffer = Buffer.from(img.data, 'base64');
       fs.writeFileSync(filepath, buffer);
-      imagePaths.push(filepath);
 
       log(`Saved image to ${filepath}`);
     }
-
-    // Add image references to prompt with explicit instruction
-    const imageRefs = imagePaths.map(p => `_images/${path.basename(p)}`).join(', ');
-    textPrompt = `${textPrompt}\n\n[IMPORTANT: The user sent ${input.images.length} image(s). You MUST use the Read tool to view the image(s) BEFORE responding: ${imageRefs}. DO NOT make assumptions about the image content without reading it first.]`;
   }
 
   // Save documents to files and reference them in prompt
@@ -287,12 +293,35 @@ async function main(): Promise<void> {
   }
 
   const prompt = textPrompt;
+  const streamingPrompt = input.images && input.images.length > 0
+    ? (async function* (): AsyncIterable<StreamingUserMessage> {
+        const content: VisionContent[] = [{ type: 'text', text: textPrompt }];
+        for (const img of input.images || []) {
+          content.push({
+            type: 'image',
+            source: {
+              type: 'base64',
+              media_type: img.mediaType,
+              data: img.data
+            }
+          });
+        }
+        yield {
+          type: 'user',
+          message: { role: 'user', content }
+        };
+      })()
+    : null;
 
   try {
-    log('Starting agent...');
+    if (streamingPrompt) {
+      log('Starting agent with vision content (streaming prompt with images)');
+    } else {
+      log('Starting agent with text-only prompt');
+    }
 
     for await (const message of query({
-      prompt,
+      prompt: (streamingPrompt || prompt) as any,
       options: {
         cwd: '/workspace/group',
         resume: input.sessionId,

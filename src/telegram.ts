@@ -21,6 +21,7 @@ export interface TelegramMessage {
   timestamp: number;
   mediaType?: string;
   mediaData?: string;
+  mediaMimeType?: 'image/jpeg' | 'image/png';
 }
 
 export class TelegramHandler {
@@ -56,6 +57,7 @@ export class TelegramHandler {
 
         let mediaType: string | undefined;
         let mediaData: string | undefined;
+        let mediaMimeType: 'image/jpeg' | 'image/png' | undefined;
 
         // Handle photo messages
         if (msg.photo && msg.photo.length > 0) {
@@ -68,9 +70,12 @@ export class TelegramHandler {
             const fileLink = await this.bot.getFileLink(fileId);
             const response = await fetch(fileLink);
             const buffer = await response.arrayBuffer();
+            const dataBuffer = Buffer.from(buffer);
+            const contentType = response.headers.get('content-type') || undefined;
 
             mediaType = 'image';
-            mediaData = Buffer.from(buffer).toString('base64');
+            mediaMimeType = detectImageMimeType(dataBuffer, contentType);
+            mediaData = dataBuffer.toString('base64');
 
             logger.info({ chatId: msg.chat.id, fileId }, 'Downloaded Telegram photo');
           } catch (err) {
@@ -104,7 +109,8 @@ export class TelegramHandler {
           messageId: msg.message_id,
           timestamp: msg.date * 1000, // Convert to milliseconds
           mediaType,
-          mediaData
+          mediaData,
+          mediaMimeType
         };
 
         logger.info({
@@ -162,6 +168,24 @@ export class TelegramHandler {
   public async getMe(): Promise<TelegramBot.User> {
     return await this.bot.getMe();
   }
+}
+
+function detectImageMimeType(buffer: Buffer, contentType?: string): 'image/jpeg' | 'image/png' {
+  if (contentType === 'image/png') return 'image/png';
+  if (contentType === 'image/jpeg' || contentType === 'image/jpg') return 'image/jpeg';
+
+  if (buffer.length >= 4) {
+    // PNG signature: 89 50 4E 47
+    if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) {
+      return 'image/png';
+    }
+    // JPEG signature: FF D8
+    if (buffer[0] === 0xff && buffer[1] === 0xd8) {
+      return 'image/jpeg';
+    }
+  }
+
+  return 'image/jpeg';
 }
 
 export function shouldProcessMessage(text: string, isPrivateChat: boolean): boolean {
