@@ -42,6 +42,8 @@ export interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  images?: Array<{ data: string; mediaType: 'image/jpeg' | 'image/png' }>;
+  documents?: Array<{ data: string; filename: string; mimetype?: string }>;
 }
 
 export interface ContainerOutput {
@@ -106,6 +108,16 @@ function buildVolumeMounts(group: RegisteredGroup, isMain: boolean): VolumeMount
     readonly: false
   });
 
+  // GitHub CLI configuration (shared across all groups, read-only)
+  const ghConfigDir = path.join(homeDir, '.config', 'gh');
+  if (fs.existsSync(ghConfigDir)) {
+    mounts.push({
+      hostPath: ghConfigDir,
+      containerPath: '/home/node/.config/gh',
+      readonly: true
+    });
+  }
+
   // Per-group IPC namespace: each group gets its own IPC directory
   // This prevents cross-group privilege escalation via IPC
   const groupIpcDir = path.join(DATA_DIR, 'ipc', group.folder);
@@ -124,7 +136,7 @@ function buildVolumeMounts(group: RegisteredGroup, isMain: boolean): VolumeMount
   const envFile = path.join(projectRoot, '.env');
   if (fs.existsSync(envFile)) {
     const envContent = fs.readFileSync(envFile, 'utf-8');
-    const allowedVars = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'];
+    const allowedVars = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', 'ANTHROPIC_MODEL', 'GITHUB_TOKEN'];
     const filteredLines = envContent
       .split('\n')
       .filter(line => {

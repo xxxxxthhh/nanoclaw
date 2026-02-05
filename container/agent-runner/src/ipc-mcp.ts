@@ -315,6 +315,28 @@ Use available_groups.json to find the JID for a group. The folder name should be
             }]
           };
         }
+      ),
+
+      tool(
+        'clear_session',
+        'Clear the current conversation session and start fresh. This resets the conversation context but preserves long-term memory (CLAUDE.md) and archived conversations. Use when the conversation feels stuck or you want to start with a clean slate.',
+        {},
+        async () => {
+          const data = {
+            type: 'clear_session',
+            groupFolder,
+            timestamp: new Date().toISOString()
+          };
+
+          writeIpcFile(TASKS_DIR, data);
+
+          return {
+            content: [{
+              type: 'text',
+              text: 'Session will be cleared after this response. The next message will start a fresh conversation.'
+            }]
+          };
+        }
       )
     ]
   });

@@ -15,6 +15,8 @@ interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  images?: Array<{ data: string; mediaType: 'image/jpeg' | 'image/png' }>;
+  documents?: Array<{ data: string; filename: string; mimetype?: string }>;
 }
 
 interface ContainerOutput {
@@ -226,10 +228,65 @@ async function main(): Promise<void> {
   let newSessionId: string | undefined;
 
   // Add context for scheduled tasks
-  let prompt = input.prompt;
+  let textPrompt = input.prompt;
   if (input.isScheduledTask) {
-    prompt = `[SCHEDULED TASK - You are running automatically, not in response to a user message. Use mcp__nanoclaw__send_message if needed to communicate with the user.]\n\n${input.prompt}`;
+    textPrompt = `[SCHEDULED TASK - You are running automatically, not in response to a user message. Use mcp__nanoclaw__send_message if needed to communicate with the user.]\n\n${input.prompt}`;
   }
+
+  // Save images to files and reference them in prompt
+  if (input.images && input.images.length > 0) {
+    const imageDir = '/workspace/group/_images';
+    if (!fs.existsSync(imageDir)) {
+      fs.mkdirSync(imageDir, { recursive: true });
+    }
+
+    const imagePaths: string[] = [];
+    for (let i = 0; i < input.images.length; i++) {
+      const img = input.images[i];
+      const ext = img.mediaType === 'image/png' ? 'png' : 'jpg';
+      const filename = `image_${Date.now()}_${i}.${ext}`;
+      const filepath = path.join(imageDir, filename);
+
+      // Write base64 image to file
+      const buffer = Buffer.from(img.data, 'base64');
+      fs.writeFileSync(filepath, buffer);
+      imagePaths.push(filepath);
+
+      log(`Saved image to ${filepath}`);
+    }
+
+    // Add image references to prompt with explicit instruction
+    const imageRefs = imagePaths.map(p => `_images/${path.basename(p)}`).join(', ');
+    textPrompt = `${textPrompt}\n\n[IMPORTANT: The user sent ${input.images.length} image(s). You MUST use the Read tool to view the image(s) BEFORE responding: ${imageRefs}. DO NOT make assumptions about the image content without reading it first.]`;
+  }
+
+  // Save documents to files and reference them in prompt
+  if (input.documents && input.documents.length > 0) {
+    const docsDir = '/workspace/group/_documents';
+    if (!fs.existsSync(docsDir)) {
+      fs.mkdirSync(docsDir, { recursive: true });
+    }
+
+    const docPaths: string[] = [];
+    for (let i = 0; i < input.documents.length; i++) {
+      const doc = input.documents[i];
+      const filename = doc.filename || `document_${Date.now()}_${i}`;
+      const filepath = path.join(docsDir, filename);
+
+      // Write base64 document to file
+      const buffer = Buffer.from(doc.data, 'base64');
+      fs.writeFileSync(filepath, buffer);
+      docPaths.push(filepath);
+
+      log(`Saved document to ${filepath}`);
+    }
+
+    // Add document references to prompt
+    const docRefs = docPaths.map(p => `_documents/${path.basename(p)}`).join(', ');
+    textPrompt = `${textPrompt}\n\n[Note: This message includes ${input.documents.length} document(s). Use the Read tool to view: ${docRefs}]`;
+  }
+
+  const prompt = textPrompt;
 
   try {
     log('Starting agent...');
