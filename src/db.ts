@@ -26,10 +26,30 @@ export function initDatabase(): void {
       content TEXT,
       timestamp TEXT,
       is_from_me INTEGER,
+      media_type TEXT,
+      media_data TEXT,
       PRIMARY KEY (id, chat_jid),
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
     CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp);
+
+    -- Migrate existing tables to add media columns if they don't exist
+    PRAGMA table_info(messages);
+  `);
+
+  // Check if media columns exist, add them if not (for existing databases)
+  const columns = db.prepare('PRAGMA table_info(messages)').all() as Array<{name: string}>;
+  const hasMediaType = columns.some(col => col.name === 'media_type');
+  const hasMediaData = columns.some(col => col.name === 'media_data');
+
+  if (!hasMediaType) {
+    db.exec('ALTER TABLE messages ADD COLUMN media_type TEXT');
+  }
+  if (!hasMediaData) {
+    db.exec('ALTER TABLE messages ADD COLUMN media_data TEXT');
+  }
+
+  db.exec(`
 
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
       id TEXT PRIMARY KEY,
@@ -69,6 +89,12 @@ export function initDatabase(): void {
   try {
     db.exec(`ALTER TABLE scheduled_tasks ADD COLUMN context_mode TEXT DEFAULT 'isolated'`);
   } catch { /* column already exists */ }
+
+  // Add media_filename column if it doesn't exist (migration for existing DBs)
+  const hasMediaFilename = columns.some(col => col.name === 'media_filename');
+  if (!hasMediaFilename) {
+    db.exec('ALTER TABLE messages ADD COLUMN media_filename TEXT');
+  }
 }
 
 /**
@@ -144,7 +170,15 @@ export function setLastGroupSync(): void {
  * Store a message with full content.
  * Only call this for registered groups where message history is needed.
  */
-export function storeMessage(msg: proto.IWebMessageInfo, chatJid: string, isFromMe: boolean, pushName?: string): void {
+export function storeMessage(
+  msg: proto.IWebMessageInfo,
+  chatJid: string,
+  isFromMe: boolean,
+  pushName?: string,
+  mediaType?: string,
+  mediaData?: string,
+  mediaFilename?: string
+): void {
   if (!msg.key) return;
 
   const content =
@@ -152,6 +186,7 @@ export function storeMessage(msg: proto.IWebMessageInfo, chatJid: string, isFrom
     msg.message?.extendedTextMessage?.text ||
     msg.message?.imageMessage?.caption ||
     msg.message?.videoMessage?.caption ||
+    msg.message?.documentMessage?.caption ||
     '';
 
   const timestamp = new Date(Number(msg.messageTimestamp) * 1000).toISOString();
@@ -159,8 +194,11 @@ export function storeMessage(msg: proto.IWebMessageInfo, chatJid: string, isFrom
   const senderName = pushName || sender.split('@')[0];
   const msgId = msg.key.id || '';
 
-  db.prepare(`INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-    .run(msgId, chatJid, sender, senderName, content, timestamp, isFromMe ? 1 : 0);
+  db.prepare(`
+    INSERT OR REPLACE INTO messages
+    (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, media_type, media_data, media_filename)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(msgId, chatJid, sender, senderName, content, timestamp, isFromMe ? 1 : 0, mediaType || null, mediaData || null, mediaFilename || null);
 }
 
 export function getNewMessages(jids: string[], lastTimestamp: string, botPrefix: string): { messages: NewMessage[]; newTimestamp: string } {
@@ -169,7 +207,7 @@ export function getNewMessages(jids: string[], lastTimestamp: string, botPrefix:
   const placeholders = jids.map(() => '?').join(',');
   // Filter out bot's own messages by checking content prefix (not is_from_me, since user shares the account)
   const sql = `
-    SELECT id, chat_jid, sender, sender_name, content, timestamp
+    SELECT id, chat_jid, sender, sender_name, content, timestamp, media_type, media_data, media_filename
     FROM messages
     WHERE timestamp > ? AND chat_jid IN (${placeholders}) AND content NOT LIKE ?
     ORDER BY timestamp
@@ -188,7 +226,7 @@ export function getNewMessages(jids: string[], lastTimestamp: string, botPrefix:
 export function getMessagesSince(chatJid: string, sinceTimestamp: string, botPrefix: string): NewMessage[] {
   // Filter out bot's own messages by checking content prefix
   const sql = `
-    SELECT id, chat_jid, sender, sender_name, content, timestamp
+    SELECT id, chat_jid, sender, sender_name, content, timestamp, media_type, media_data, media_filename
     FROM messages
     WHERE chat_jid = ? AND timestamp > ? AND content NOT LIKE ?
     ORDER BY timestamp
@@ -281,4 +319,31 @@ export function getTaskRunLogs(taskId: string, limit = 10): TaskRunLog[] {
     ORDER BY run_at DESC
     LIMIT ?
   `).all(taskId, limit) as TaskRunLog[];
+}
+
+/**
+ * Store a Telegram message
+ */
+export function storeTelegramMessage(
+  messageId: number,
+  chatId: number,
+  userId: number,
+  username: string | undefined,
+  content: string,
+  timestamp: number,
+  isFromBot: boolean,
+  mediaType?: string,
+  mediaData?: string
+): void {
+  const chatJid = `telegram:${chatId}`;
+  const sender = `telegram:${userId}`;
+  const senderName = username || userId.toString();
+  const msgId = `tg_${messageId}`;
+  const isoTimestamp = new Date(timestamp).toISOString();
+
+  db.prepare(`
+    INSERT OR REPLACE INTO messages
+    (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, media_type, media_data)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(msgId, chatJid, sender, senderName, content, isoTimestamp, isFromBot ? 1 : 0, mediaType || null, mediaData || null);
 }

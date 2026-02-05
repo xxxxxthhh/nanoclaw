@@ -2,7 +2,8 @@ import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
   makeCacheableSignalKeyStore,
-  WASocket
+  WASocket,
+  downloadMediaMessage
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import { exec, execSync } from 'child_process';
@@ -24,6 +25,7 @@ import { initDatabase, storeMessage, storeChatMetadata, getNewMessages, getMessa
 import { startSchedulerLoop } from './task-scheduler.js';
 import { runContainerAgent, writeTasksSnapshot, writeGroupsSnapshot, AvailableGroup } from './container-runner.js';
 import { loadJson, saveJson } from './utils.js';
+import { TelegramIntegration } from './telegram-integration.js';
 
 const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -33,6 +35,7 @@ const logger = pino({
 });
 
 let sock: WASocket;
+let telegram: TelegramIntegration | null = null;
 let lastTimestamp = '';
 let sessions: Session = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
@@ -59,6 +62,38 @@ function loadState(): void {
 function saveState(): void {
   saveJson(path.join(DATA_DIR, 'router_state.json'), { last_timestamp: lastTimestamp, last_agent_timestamp: lastAgentTimestamp });
   saveJson(path.join(DATA_DIR, 'sessions.json'), sessions);
+}
+
+async function clearSessionForGroup(groupFolder: string): Promise<void> {
+  const sessionId = sessions[groupFolder];
+  if (!sessionId) {
+    logger.debug({ groupFolder }, 'No session to clear');
+    return;
+  }
+
+  // Remove session ID from memory and storage
+  delete sessions[groupFolder];
+  saveJson(path.join(DATA_DIR, 'sessions.json'), sessions);
+
+  // Delete session files
+  const sessionDir = path.join(DATA_DIR, 'sessions', groupFolder, '.claude', 'projects', '-workspace-group');
+  const sessionFile = path.join(sessionDir, `${sessionId}.jsonl`);
+  const sessionFolder = path.join(sessionDir, sessionId);
+
+  try {
+    if (fs.existsSync(sessionFile)) {
+      fs.unlinkSync(sessionFile);
+      logger.debug({ sessionFile }, 'Deleted session file');
+    }
+    if (fs.existsSync(sessionFolder)) {
+      fs.rmSync(sessionFolder, { recursive: true, force: true });
+      logger.debug({ sessionFolder }, 'Deleted session folder');
+    }
+    logger.info({ groupFolder, sessionId }, 'Session cleared successfully');
+  } catch (err) {
+    logger.error({ groupFolder, sessionId, err }, 'Failed to delete session files');
+    throw err;
+  }
 }
 
 function registerGroup(jid: string, group: RegisteredGroup): void {
@@ -149,25 +184,72 @@ async function processMessage(msg: NewMessage): Promise<void> {
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
-    return `<message sender="${escapeXml(m.sender_name)}" time="${m.timestamp}">${escapeXml(m.content)}</message>`;
+
+    let messageContent = escapeXml(m.content);
+
+    // Add media indicator if present
+    if (m.media_type && m.media_data) {
+      const mediaLabel = m.media_type === 'document' ? 'Document' : 'Image';
+      messageContent = `[${mediaLabel} attached]\n${messageContent}`;
+    }
+
+    return `<message sender="${escapeXml(m.sender_name)}" time="${m.timestamp}">${messageContent}</message>`;
   });
   const prompt = `<messages>\n${lines.join('\n')}\n</messages>`;
 
+  // Extract images from messages for multimodal input
+  const images = missedMessages
+    .filter(m => m.media_type === 'image' && m.media_data)
+    .map(m => ({
+      data: m.media_data!,
+      mediaType: 'image/jpeg' as const
+    }));
+
+  // Extract documents from messages
+  const documents = missedMessages
+    .filter(m => m.media_type === 'document' && m.media_data)
+    .map(m => ({
+      data: m.media_data!,
+      filename: m.media_filename || 'document'
+    }));
+
   if (!prompt) return;
 
-  logger.info({ group: group.name, messageCount: missedMessages.length }, 'Processing message');
+  logger.info({
+    group: group.name,
+    messageCount: missedMessages.length,
+    imageCount: images.length,
+    documentCount: documents.length
+  }, 'Processing message');
 
   await setTyping(msg.chat_jid, true);
-  const response = await runAgent(group, prompt, msg.chat_jid);
+  const response = await runAgent(
+    group,
+    prompt,
+    msg.chat_jid,
+    images.length > 0 ? images : undefined,
+    documents.length > 0 ? documents : undefined
+  );
   await setTyping(msg.chat_jid, false);
 
   if (response) {
     lastAgentTimestamp[msg.chat_jid] = msg.timestamp;
-    await sendMessage(msg.chat_jid, `${ASSISTANT_NAME}: ${response}`);
+    // For WhatsApp, keep prefix for message filtering (shared account issue)
+    // For Telegram, prefix is not needed (handled separately)
+    const messageText = msg.chat_jid.startsWith('telegram:')
+      ? response
+      : `${ASSISTANT_NAME}: ${response}`;
+    await sendMessage(msg.chat_jid, messageText);
   }
 }
 
-async function runAgent(group: RegisteredGroup, prompt: string, chatJid: string): Promise<string | null> {
+async function runAgent(
+  group: RegisteredGroup,
+  prompt: string,
+  chatJid: string,
+  images?: Array<{ data: string; mediaType: 'image/jpeg' | 'image/png' }>,
+  documents?: Array<{ data: string; filename: string }>
+): Promise<string | null> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
   const sessionId = sessions[group.folder];
 
@@ -193,7 +275,9 @@ async function runAgent(group: RegisteredGroup, prompt: string, chatJid: string)
       sessionId,
       groupFolder: group.folder,
       chatJid,
-      isMain
+      isMain,
+      images,
+      documents
     });
 
     if (output.newSessionId) {
@@ -215,7 +299,17 @@ async function runAgent(group: RegisteredGroup, prompt: string, chatJid: string)
 
 async function sendMessage(jid: string, text: string): Promise<void> {
   try {
-    await sock.sendMessage(jid, { text });
+    // Route to appropriate platform
+    if (jid.startsWith('telegram:')) {
+      if (telegram) {
+        await telegram.send(jid, text);
+      } else {
+        logger.error({ jid }, 'Telegram not initialized');
+      }
+    } else {
+      // WhatsApp
+      await sock.sendMessage(jid, { text });
+    }
     logger.info({ jid, length: text.length }, 'Message sent');
   } catch (err) {
     logger.error({ jid, err }, 'Failed to send message');
@@ -257,7 +351,11 @@ function startIpcWatcher(): void {
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];
                 if (isMain || (targetGroup && targetGroup.folder === sourceGroup)) {
-                  await sendMessage(data.chatJid, `${ASSISTANT_NAME}: ${data.text}`);
+                  // Add prefix for WhatsApp (filtering), not for Telegram
+                  const messageText = data.chatJid.startsWith('telegram:')
+                    ? data.text
+                    : `${ASSISTANT_NAME}: ${data.text}`;
+                  await sendMessage(data.chatJid, messageText);
                   logger.info({ chatJid: data.chatJid, sourceGroup }, 'IPC message sent');
                 } else {
                   logger.warn({ chatJid: data.chatJid, sourceGroup }, 'Unauthorized IPC message attempt blocked');
@@ -467,6 +565,15 @@ async function processTaskIpc(
       }
       break;
 
+    case 'clear_session':
+      if (data.groupFolder) {
+        // Clear the session for this group
+        delete sessions[data.groupFolder];
+        saveJson(path.join(DATA_DIR, 'sessions.json'), sessions);
+        logger.info({ groupFolder: data.groupFolder, requestedBy: sourceGroup }, 'Session cleared via IPC');
+      }
+      break;
+
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
   }
@@ -527,7 +634,7 @@ async function connectWhatsApp(): Promise<void> {
 
   sock.ev.on('creds.update', saveCreds);
 
-  sock.ev.on('messages.upsert', ({ messages }) => {
+  sock.ev.on('messages.upsert', async ({ messages }) => {
     for (const msg of messages) {
       if (!msg.message) continue;
       const chatJid = msg.key.remoteJid;
@@ -540,7 +647,37 @@ async function connectWhatsApp(): Promise<void> {
 
       // Only store full message content for registered groups
       if (registeredGroups[chatJid]) {
-        storeMessage(msg, chatJid, msg.key.fromMe || false, msg.pushName || undefined);
+        // Check if message contains media (image, video, etc.)
+        let mediaType: string | undefined;
+        let mediaData: string | undefined;
+        let mediaFilename: string | undefined;
+
+        try {
+          if (msg.message.imageMessage) {
+            mediaType = 'image';
+            const buffer = await downloadMediaMessage(msg, 'buffer', {});
+            if (buffer) {
+              mediaData = (buffer as Buffer).toString('base64');
+            }
+          } else if (msg.message.videoMessage) {
+            mediaType = 'video';
+            const buffer = await downloadMediaMessage(msg, 'buffer', {});
+            if (buffer) {
+              mediaData = (buffer as Buffer).toString('base64');
+            }
+          } else if (msg.message.documentMessage) {
+            mediaType = 'document';
+            mediaFilename = msg.message.documentMessage.fileName || 'document';
+            const buffer = await downloadMediaMessage(msg, 'buffer', {});
+            if (buffer) {
+              mediaData = (buffer as Buffer).toString('base64');
+            }
+          }
+        } catch (err) {
+          logger.error({ err, chatJid, msgId: msg.key.id }, 'Failed to download media');
+        }
+
+        storeMessage(msg, chatJid, msg.key.fromMe || false, msg.pushName || undefined, mediaType, mediaData, mediaFilename);
       }
     }
   });
@@ -551,7 +688,8 @@ async function startMessageLoop(): Promise<void> {
 
   while (true) {
     try {
-      const jids = Object.keys(registeredGroups);
+      // Only poll WhatsApp groups, not Telegram (Telegram uses real-time event handling)
+      const jids = Object.keys(registeredGroups).filter(jid => !jid.startsWith('telegram:'));
       const { messages } = getNewMessages(jids, lastTimestamp, ASSISTANT_NAME);
 
       if (messages.length > 0) logger.info({ count: messages.length }, 'New messages');
@@ -598,12 +736,68 @@ function ensureContainerSystemRunning(): void {
   }
 }
 
+async function connectTelegram(): Promise<void> {
+  const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!telegramToken) {
+    logger.info('Telegram bot token not configured, skipping Telegram integration');
+    return;
+  }
+
+  const authorizedUserId = process.env.TELEGRAM_AUTHORIZED_USER_ID
+    ? parseInt(process.env.TELEGRAM_AUTHORIZED_USER_ID, 10)
+    : undefined;
+
+  const mainChatId = process.env.TELEGRAM_MAIN_CHAT_ID
+    ? parseInt(process.env.TELEGRAM_MAIN_CHAT_ID, 10)
+    : undefined;
+
+  try {
+    telegram = new TelegramIntegration(
+      {
+        token: telegramToken,
+        authorizedUserId,
+        mainChatId
+      },
+      // Message processor - reuse existing logic
+      async (
+        chatJid: string,
+        content: string,
+        timestamp: string,
+        images?: Array<{ data: string; mediaType: 'image/jpeg' | 'image/png' }>,
+        documents?: Array<{ data: string; filename: string }>
+      ) => {
+        const group = registeredGroups[chatJid];
+        if (!group) {
+          logger.warn({ chatJid }, 'Telegram chat not registered');
+          return null;
+        }
+
+        // Build prompt from message (handle empty content for image-only messages)
+        const messageContent = content || (images ? '[Image]' : '');
+        const prompt = `<messages>\n<message sender="User" time="${timestamp}">${messageContent}</message>\n</messages>`;
+        return await runAgent(group, prompt, chatJid, images, documents);
+      },
+      // Response sender
+      sendMessage,
+      // Session clearer
+      clearSessionForGroup
+    );
+
+    const botInfo = await telegram.getMe();
+    logger.info({ username: botInfo.username, id: botInfo.id }, 'Connected to Telegram');
+  } catch (err) {
+    logger.error({ err }, 'Failed to connect to Telegram');
+    telegram = null;
+  }
+}
+
 async function main(): Promise<void> {
   ensureContainerSystemRunning();
   initDatabase();
   logger.info('Database initialized');
   loadState();
   await connectWhatsApp();
+  await connectTelegram();
 }
 
 main().catch(err => {

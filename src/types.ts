@@ -52,6 +52,9 @@ export interface NewMessage {
   sender_name: string;
   content: string;
   timestamp: string;
+  media_type?: string | null;  // 'image', 'video', 'audio', 'document', or null
+  media_data?: string | null;  // base64-encoded media data
+  media_filename?: string | null;  // filename for documents
 }
 
 export interface ScheduledTask {
