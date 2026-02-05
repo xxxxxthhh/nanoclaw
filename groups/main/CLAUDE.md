@@ -83,6 +83,7 @@ Read the CLAUDE.md files in each folder for role-specific context and workflows.
 - Team: Gavriel (founder, sales & client work), Lazer (founder, dealflow), Ali (PM)
 - Obsidian-based workflow with Kanban boards (PIPELINE.md, PORTFOLIO.md)
 
+---
 ## WhatsApp Formatting
 
 Do NOT use markdown headings (##) in WhatsApp messages. Only use:
@@ -207,7 +208,7 @@ Groups can have extra directories mounted. Add `containerConfig` to their entry:
     "containerConfig": {
       "additionalMounts": [
         {
-          "hostPath": "/Users/gavriel/projects/webapp",
+          "hostPath": "~/projects/webapp",
           "containerPath": "webapp",
           "readonly": false
         }
