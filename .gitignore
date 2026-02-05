@@ -21,3 +21,26 @@ logs/
 .vscode/
 
 agents-sdk-docs
+
+# Workspace projects and temporary files
+groups/main/SignalFeed/
+groups/main/currency-dashboard/
+groups/main/research-hub/
+groups/main/rss-digest/
+groups/main/AtypicalLifeClub/
+
+# Research reports (temporary)
+groups/main/*_Deep_Research_Report*.md
+groups/main/*_Research_Report*.md
+groups/main/*_Research_Report*.html
+groups/main/*研究报告*.md
+groups/main/integration-plan.md
+groups/main/ui-unification-plan.md
+
+# Runtime generated files
+groups/main/_images/
+groups/main/conversations/
+
+# Research framework (user-specific)
+groups/main/research-framework/
+groups/main/research_reports/
