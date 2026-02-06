@@ -27,11 +27,31 @@ export interface TelegramMessage {
 export class TelegramHandler {
   private bot: TelegramBot;
   private authorizedUserId?: number;
+  private token: string;
+  private pollingErrorCount = 0;
+  private lastPollingError?: Date;
+  private readonly MAX_POLLING_ERRORS = 5;
+  private readonly ERROR_WINDOW_MS = 60000; // 1 minute
+  private restartTimer?: NodeJS.Timeout;
+  private isRestarting = false;
 
   constructor(token: string, authorizedUserId?: number) {
-    this.bot = new TelegramBot(token, { polling: true });
+    this.token = token;
     this.authorizedUserId = authorizedUserId;
+    this.bot = this.createBot();
     this.setupHandlers();
+  }
+
+  private createBot(): TelegramBot {
+    return new TelegramBot(this.token, {
+      polling: {
+        interval: 1000, // Poll every 1 second
+        autoStart: true,
+        params: {
+          timeout: 10 // Long polling timeout
+        }
+      }
+    });
   }
 
   private setupHandlers(): void {
@@ -129,10 +149,98 @@ export class TelegramHandler {
     });
 
     this.bot.on('polling_error', (error) => {
-      logger.error({ error }, 'Telegram polling error');
+      this.handlePollingError(error);
     });
 
     logger.info('Telegram bot handlers initialized');
+  }
+
+  private handlePollingError(error: Error): void {
+    const now = new Date();
+    const errorCode = (error as any).code;
+    const errorMessage = error.message;
+
+    // Check if this is a network error that warrants reconnection
+    const isNetworkError =
+      errorCode === 'EFATAL' ||
+      errorMessage.includes('ECONNRESET') ||
+      errorMessage.includes('ETIMEDOUT') ||
+      errorMessage.includes('ENOTFOUND') ||
+      errorMessage.includes('ECONNREFUSED');
+
+    if (isNetworkError) {
+      logger.warn({
+        error: { code: errorCode, message: errorMessage },
+        errorCount: this.pollingErrorCount + 1
+      }, 'Telegram network error detected');
+
+      // Reset error count if last error was more than ERROR_WINDOW_MS ago
+      if (this.lastPollingError && (now.getTime() - this.lastPollingError.getTime()) > this.ERROR_WINDOW_MS) {
+        this.pollingErrorCount = 0;
+      }
+
+      this.pollingErrorCount++;
+      this.lastPollingError = now;
+
+      // If too many errors in a short time, restart the bot
+      if (this.pollingErrorCount >= this.MAX_POLLING_ERRORS) {
+        logger.error({
+          errorCount: this.pollingErrorCount,
+          windowMs: this.ERROR_WINDOW_MS
+        }, 'Too many polling errors, restarting Telegram bot');
+        this.restartPolling();
+      }
+    } else {
+      // Non-network errors (e.g., API errors) - just log
+      logger.error({ error: { code: errorCode, message: errorMessage } }, 'Telegram polling error');
+    }
+  }
+
+  private async restartPolling(): Promise<void> {
+    if (this.isRestarting) {
+      logger.debug('Bot restart already in progress, skipping');
+      return;
+    }
+
+    this.isRestarting = true;
+
+    try {
+      logger.info('Stopping Telegram polling...');
+      await this.bot.stopPolling();
+
+      // Wait a bit before restarting
+      await new Promise(resolve => setTimeout(resolve, 2000));
+
+      logger.info('Restarting Telegram polling...');
+      await this.bot.startPolling();
+
+      // Reset error counter on successful restart
+      this.pollingErrorCount = 0;
+      this.lastPollingError = undefined;
+
+      logger.info('Telegram polling restarted successfully');
+    } catch (err) {
+      logger.error({ error: err }, 'Failed to restart Telegram polling');
+
+      // Schedule another restart attempt
+      if (this.restartTimer) {
+        clearTimeout(this.restartTimer);
+      }
+      this.restartTimer = setTimeout(() => {
+        logger.info('Retrying Telegram polling restart...');
+        this.isRestarting = false;
+        this.restartPolling();
+      }, 5000);
+    } finally {
+      this.isRestarting = false;
+    }
+  }
+
+  public async stopPolling(): Promise<void> {
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+    }
+    await this.bot.stopPolling();
   }
 
   public onMessage(handler: (msg: TelegramMessage) => Promise<void>): void {

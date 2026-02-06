@@ -1030,6 +1030,18 @@ async function main(): Promise<void> {
   loadState();
   await connectWhatsApp();
   await connectTelegram();
+
+  // Handle graceful shutdown
+  const shutdown = async (signal: string) => {
+    logger.info({ signal }, 'Shutting down NanoClaw...');
+    if (telegram) {
+      await telegram.shutdown();
+    }
+    process.exit(0);
+  };
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
 main().catch((err) => {

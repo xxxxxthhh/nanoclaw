@@ -43,6 +43,10 @@ export class TelegramIntegration {
   private processMessage: MessageHandler;
   private sendResponse: ResponseSender;
   private clearSession: SessionClearer;
+  private healthCheckInterval?: NodeJS.Timeout;
+  private lastMessageTime?: Date;
+  private readonly HEALTH_CHECK_INTERVAL_MS = 300000; // 5 minutes
+  private readonly MAX_SILENCE_MS = 3600000; // 1 hour
 
   constructor(
     config: TelegramConfig,
@@ -57,11 +61,46 @@ export class TelegramIntegration {
     this.clearSession = clearSession;
 
     this.setupMessageHandler();
+    this.startHealthCheck();
+  }
+
+  private startHealthCheck(): void {
+    this.healthCheckInterval = setInterval(async () => {
+      try {
+        // Verify bot is still connected by calling getMe
+        await this.handler.getMe();
+
+        const now = new Date();
+        if (this.lastMessageTime) {
+          const silenceDuration = now.getTime() - this.lastMessageTime.getTime();
+          if (silenceDuration > this.MAX_SILENCE_MS) {
+            logger.debug({
+              silenceMinutes: Math.floor(silenceDuration / 60000)
+            }, 'Telegram bot has been silent for extended period');
+          }
+        }
+      } catch (err) {
+        logger.error({ error: err }, 'Telegram health check failed - bot may be disconnected');
+      }
+    }, this.HEALTH_CHECK_INTERVAL_MS);
+
+    logger.info({ intervalMinutes: this.HEALTH_CHECK_INTERVAL_MS / 60000 }, 'Telegram health check started');
+  }
+
+  public async shutdown(): Promise<void> {
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+    }
+    await this.handler.stopPolling();
+    logger.info('Telegram integration shut down');
   }
 
   private setupMessageHandler(): void {
     this.handler.onMessage(async (msg: TelegramMessage) => {
       try {
+        // Update last message time for health monitoring
+        this.lastMessageTime = new Date();
+
         // Store chat metadata for discovery
         const chatJid = `telegram:${msg.chatId}`;
         const chatName = msg.username ? `@${msg.username}` : chatJid;
