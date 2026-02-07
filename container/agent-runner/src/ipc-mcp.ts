@@ -8,6 +8,8 @@ import { z } from 'zod';
 import fs from 'fs';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
+// @ts-ignore - Copied during Docker build from .claude/skills/x-integration/
+import { createXTools } from './skills/x-integration/agent.js';
 
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
@@ -337,7 +339,8 @@ Use available_groups.json to find the JID for a group. The folder name should be
             }]
           };
         }
-      )
+      ),
+      ...createXTools({ groupFolder, isMain })
     ]
   });
 }

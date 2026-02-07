@@ -22,18 +22,28 @@ interface SkillResult {
 }
 
 // Run a skill script as subprocess
+// Resolve npx path at import time (launchctl doesn't have full PATH)
+const NPX_PATH = ['/opt/homebrew/bin/npx', '/usr/local/bin/npx']
+  .find(p => fs.existsSync(p)) || 'npx';
+
+// Ensure child processes have full PATH (launchctl strips it)
+const FULL_PATH = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin']
+  .join(':') + (process.env.PATH ? ':' + process.env.PATH : '');
+
 async function runScript(script: string, args: object): Promise<SkillResult> {
   const scriptPath = path.join(process.cwd(), '.claude', 'skills', 'x-integration', 'scripts', `${script}.ts`);
 
   return new Promise((resolve) => {
-    const proc = spawn('npx', ['tsx', scriptPath], {
+    const proc = spawn(NPX_PATH, ['tsx', scriptPath], {
       cwd: process.cwd(),
-      env: { ...process.env, NANOCLAW_ROOT: process.cwd() },
+      env: { ...process.env, PATH: FULL_PATH, NANOCLAW_ROOT: process.cwd() },
       stdio: ['pipe', 'pipe', 'pipe']
     });
 
     let stdout = '';
+    let stderr = '';
     proc.stdout.on('data', (data) => { stdout += data.toString(); });
+    proc.stderr.on('data', (data) => { stderr += data.toString(); });
     proc.stdin.write(JSON.stringify(args));
     proc.stdin.end();
 
@@ -45,7 +55,8 @@ async function runScript(script: string, args: object): Promise<SkillResult> {
     proc.on('close', (code) => {
       clearTimeout(timer);
       if (code !== 0) {
-        resolve({ success: false, message: `Script exited with code: ${code}` });
+        logger.error({ script, code, stderr: stderr.slice(0, 500) }, 'X script failed');
+        resolve({ success: false, message: `Script exited with code: ${code}. ${stderr.slice(0, 200)}` });
         return;
       }
       try {

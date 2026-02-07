@@ -744,8 +744,14 @@ async function processTaskIpc(
       }
       break;
 
-    default:
-      logger.warn({ type: data.type }, 'Unknown IPC task type');
+    default: {
+      // @ts-ignore - Skill lives outside src/ rootDir
+      const { handleXIpc } = await import('../.claude/skills/x-integration/host.js');
+      const handled = await handleXIpc(data, sourceGroup, isMain, DATA_DIR);
+      if (!handled) {
+        logger.warn({ type: data.type }, 'Unknown IPC task type');
+      }
+    }
   }
 }
 
