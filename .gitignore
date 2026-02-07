@@ -3,6 +3,10 @@ node_modules/
 
 # Build output
 dist/
+.claude/skills/**/*.js
+.claude/skills/**/*.js.map
+.claude/skills/**/*.d.ts
+.claude/skills/**/*.d.ts.map
 
 # Local data & auth
 store/
