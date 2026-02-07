@@ -26,6 +26,10 @@ export const CONTAINER_TIMEOUT = parseInt(
   process.env.CONTAINER_TIMEOUT || '300000',
   10,
 );
+export const PROGRESS_REPORT_INTERVAL = parseInt(
+  process.env.PROGRESS_REPORT_INTERVAL || '1800000',
+  10,
+); // 30 minutes default
 export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
   process.env.CONTAINER_MAX_OUTPUT_SIZE || '10485760',
   10,

@@ -8,11 +8,13 @@ import os from 'os';
 import path from 'path';
 
 import {
+  ASSISTANT_NAME,
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
   DATA_DIR,
   GROUPS_DIR,
+  PROGRESS_REPORT_INTERVAL,
 } from './config.js';
 import { logger } from './logger.js';
 import { validateAdditionalMounts } from './mount-security.js';
@@ -289,8 +291,45 @@ export async function runContainerAgent(
       });
     }, group.containerConfig?.timeout || CONTAINER_TIMEOUT);
 
+    // Progress reporting: send status update every PROGRESS_REPORT_INTERVAL
+    let progressReportCount = 0;
+    const progressInterval = setInterval(() => {
+      progressReportCount++;
+      const elapsed = Date.now() - startTime;
+      const elapsedMinutes = Math.floor(elapsed / 60000);
+      const elapsedSeconds = Math.floor((elapsed % 60000) / 1000);
+
+      const progressMessage = `⏱️ Agent 运行进度更新 #${progressReportCount}:\n\n` +
+        `📊 已运行: ${elapsedMinutes}分${elapsedSeconds}秒\n` +
+        `🔄 状态: 正在处理中...\n` +
+        `💡 任务仍在执行，请耐心等待`;
+
+      // Send progress message via IPC
+      const ipcDir = path.join(DATA_DIR, 'ipc', group.folder, 'messages');
+      fs.mkdirSync(ipcDir, { recursive: true });
+      const ipcFile = path.join(ipcDir, `progress-${Date.now()}.json`);
+
+      try {
+        fs.writeFileSync(
+          ipcFile,
+          JSON.stringify({
+            type: 'message',
+            chatJid: input.chatJid,
+            text: progressMessage,
+          }),
+        );
+        logger.info(
+          { group: group.name, elapsed: elapsedMinutes, reportCount: progressReportCount },
+          'Progress report sent',
+        );
+      } catch (err) {
+        logger.error({ err, group: group.name }, 'Failed to send progress report');
+      }
+    }, PROGRESS_REPORT_INTERVAL);
+
     container.on('close', (code) => {
       clearTimeout(timeout);
+      clearInterval(progressInterval);
       const duration = Date.now() - startTime;
 
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');

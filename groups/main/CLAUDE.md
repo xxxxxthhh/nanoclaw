@@ -67,6 +67,89 @@ You have a systematic framework for deep fundamental company research and invest
 
 **Before starting research:** Send acknowledgment message outlining your understanding and plan.
 
+## Research Report Publishing (AtypicalLifeClub)
+
+研报完成后，发布到博客网站 `atypicallife.club`。仓库路径：`/workspace/group/AtypicalLifeClub/`
+
+**重要：每篇研报必须生成中英文双语版本。**
+
+**新架构说明：**
+- 研报已迁移到 `static/invest/research/` 目录
+- 使用 `data/reports.json` 集中管理报告元数据（不再在 app.js 里硬编码）
+- 使用通用 `reports/view.html` 渲染所有报告（通过 `?id=xxx&lang=zh` 参数）
+- 每个报告的独立 HTML（如 `reports/amd-2026.html`）仅作为重定向页面
+- 支持中英文切换按钮
+
+**发布流程（4 步）：**
+
+### Step 1: 保存中英文双语 Markdown 研报
+- 路径：`static/invest/research/`
+- 英文版命名：`公司名_Deep_Research_Report_日期.md`（如 `AMD_Deep_Research_Report_2026-02.md`）
+- 中文版命名：`公司名中文_深度研究报告_日期.md`（如 `AMD_深度研究报告_2026-02.md`）
+
+### Step 2: 创建重定向 HTML 页面
+- 路径：`static/invest/research/reports/`
+- 命名：`公司名小写-年份.html`（如 `amd-2026.html`）
+- 内容为简单重定向到 `view.html?id=公司-年份`：
+```html
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>公司名 深度研究报告</title>
+    <meta http-equiv="refresh" content="0; url=/invest/research/reports/view.html?id=company-yyyy">
+    <script>
+        window.location.replace('/invest/research/reports/view.html?id=company-yyyy');
+    </script>
+</head>
+<body>
+    <p>正在跳转到新页面：<a href="/invest/research/reports/view.html?id=company-yyyy">公司名 深度研究报告</a></p>
+</body>
+</html>
+```
+
+### Step 3: 更新 reports.json 注册报告
+- 文件：`static/invest/research/data/reports.json`
+- 在数组开头添加新条目：
+```json
+{
+    "id": "company-yyyy",
+    "company": "公司名",
+    "ticker": "交易所: 代码",
+    "title": "中文报告标题",
+    "titleEn": "English Report Title",
+    "summary": "一句话中文摘要",
+    "tags": ["标签1", "标签2"],
+    "category": "tech",
+    "date": "YYYY-MM-DD",
+    "lastUpdate": "YYYY-MM-DD",
+    "file": "/invest/research/reports/view.html?id=company-yyyy",
+    "markdownFiles": {
+        "zh": "/invest/research/中文版文件名.md",
+        "en": "/invest/research/English_filename.md"
+    },
+    "highlights": ["要点1", "要点2", "要点3", "要点4"]
+}
+```
+- `category` 可选值：`tech` / `nuclear` / `energy`
+
+### Step 4: Git push 部署
+```bash
+cd /workspace/group/AtypicalLifeClub
+git add static/invest/research/
+git commit -m "Add research report: 公司名"
+git push origin main
+```
+Cloudflare Pages 自动构建部署。
+
+### 筛选分类
+当前支持：`all` / `nuclear` / `tech` / `energy`
+如需新分类，同时更新 `static/invest/research/index.html` 中的 filter buttons。
+
+### 旧路径兼容
+`static/research/reports/` 下的旧 HTML 已改为重定向到 `/invest/research/reports/` 新路径。
+
 ## Qwibit Ops Access
 
 You have access to Qwibit operations data at `/workspace/extra/qwibit-ops/` with these key areas:
