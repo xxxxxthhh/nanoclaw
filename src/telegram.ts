@@ -196,7 +196,7 @@ export class TelegramHandler {
     }
   }
 
-  private async restartPolling(): Promise<void> {
+  public async restartPolling(): Promise<void> {
     if (this.isRestarting) {
       logger.debug('Bot restart already in progress, skipping');
       return;

@@ -64,11 +64,14 @@ export class TelegramIntegration {
     this.startHealthCheck();
   }
 
+  private healthCheckFailCount = 0;
+
   private startHealthCheck(): void {
     this.healthCheckInterval = setInterval(async () => {
       try {
         // Verify bot is still connected by calling getMe
         await this.handler.getMe();
+        this.healthCheckFailCount = 0;
 
         const now = new Date();
         if (this.lastMessageTime) {
@@ -80,7 +83,15 @@ export class TelegramIntegration {
           }
         }
       } catch (err) {
-        logger.error({ error: err }, 'Telegram health check failed - bot may be disconnected');
+        this.healthCheckFailCount++;
+        logger.error({ error: err, failCount: this.healthCheckFailCount }, 'Telegram health check failed - bot may be disconnected');
+
+        // After 2 consecutive failures, force restart polling
+        if (this.healthCheckFailCount >= 2) {
+          logger.warn({ failCount: this.healthCheckFailCount }, 'Forcing Telegram polling restart due to health check failures');
+          this.healthCheckFailCount = 0;
+          await this.handler.restartPolling();
+        }
       }
     }, this.HEALTH_CHECK_INTERVAL_MS);
 
