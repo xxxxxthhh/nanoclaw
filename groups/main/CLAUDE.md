@@ -20,6 +20,14 @@ Your output is sent to the user or group.
 
 You also have `mcp__nanoclaw__send_message` which sends a message immediately while you're still working. This is useful when you want to acknowledge a request before starting longer work.
 
+### Progress Reporting
+
+For tasks that take more than 3 minutes (e.g. company research, multi-step web scraping):
+- Use `mcp__nanoclaw__send_message` every 3-5 minutes with **concrete** progress — what you've done, what's next
+- Bad: "处理中..." / "Still working..."
+- Good: "已完成财务数据收集（营收、利润率、FCF），正在分析竞争格局..."
+- When the task is fully done, send a final completion message explicitly
+
 ### Internal thoughts
 
 If part of your output is internal reasoning rather than something for the user, wrap it in `<internal>` tags:

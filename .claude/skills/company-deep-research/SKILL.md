@@ -42,6 +42,11 @@ Systematic framework for producing **objective, dialectical, and comprehensive**
    - Full research report (recommended)
    - Investment memo style
 
+**Progress milestones:** After completing each phase, use `mcp__nanoclaw__send_message` to briefly update the user:
+- Phase 2 done → "数据收集完成，开始分析..."
+- Phase 3 done → "分析框架完成，开始撰写报告..."
+- Phase 5 done → "研报完成！"
+
 ### Phase 2: Information Gathering
 
 **Mandatory Data Sources (search all):**

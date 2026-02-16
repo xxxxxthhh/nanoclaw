@@ -14,7 +14,7 @@ import {
   CONTAINER_TIMEOUT,
   DATA_DIR,
   GROUPS_DIR,
-  PROGRESS_REPORT_INTERVAL,
+  SILENCE_NUDGE_INTERVAL,
 } from './config.js';
 import { logger } from './logger.js';
 import { validateAdditionalMounts } from './mount-security.js';
@@ -328,8 +328,9 @@ export async function runContainerAgent(
             if (parsed.newSessionId) {
               newSessionId = parsed.newSessionId;
             }
-            // Activity detected — reset the hard timeout
+            // Activity detected — reset the hard timeout and silence tracker
             resetTimeout();
+            updateActivity();
             // Call onOutput for all markers (including null results)
             // so idle timers start even for "silent" query completions.
             outputChain = outputChain.then(() => onOutput(parsed));
@@ -387,45 +388,56 @@ export async function runContainerAgent(
       timeout = setTimeout(killOnTimeout, timeoutMs);
     };
 
-    // Progress reporting: send status update every PROGRESS_REPORT_INTERVAL
-    let progressReportCount = 0;
-    const progressInterval = setInterval(() => {
-      progressReportCount++;
-      const elapsed = Date.now() - startTime;
-      const elapsedMinutes = Math.floor(elapsed / 60000);
-      const elapsedSeconds = Math.floor((elapsed % 60000) / 1000);
+    // Silence nudge: when agent produces no output for SILENCE_NUDGE_INTERVAL,
+    // send a follow-up message via IPC input asking it to report progress.
+    let lastActivityTime = Date.now();
+    let nudgeCount = 0;
+    const MAX_NUDGES = 6;
+    let silenceNudgeInterval: NodeJS.Timeout | undefined;
 
-      const progressMessage = `⏱️ Agent 运行进度更新 #${progressReportCount}:\n\n` +
-        `📊 已运行: ${elapsedMinutes}分${elapsedSeconds}秒\n` +
-        `🔄 状态: 正在处理中...\n` +
-        `💡 任务仍在执行，请耐心等待`;
+    const updateActivity = () => {
+      lastActivityTime = Date.now();
+    };
 
-      // Send progress message via IPC
-      const ipcDir = path.join(DATA_DIR, 'ipc', group.folder, 'messages');
-      fs.mkdirSync(ipcDir, { recursive: true });
-      const ipcFile = path.join(ipcDir, `progress-${Date.now()}.json`);
+    if (SILENCE_NUDGE_INTERVAL > 0) {
+      silenceNudgeInterval = setInterval(() => {
+        if (nudgeCount >= MAX_NUDGES) {
+          clearInterval(silenceNudgeInterval);
+          return;
+        }
+        const silentMs = Date.now() - lastActivityTime;
+        if (silentMs < SILENCE_NUDGE_INTERVAL) return;
 
-      try {
-        fs.writeFileSync(
-          ipcFile,
-          JSON.stringify({
-            type: 'message',
-            chatJid: input.chatJid,
-            text: progressMessage,
-          }),
-        );
-        logger.info(
-          { group: group.name, elapsed: elapsedMinutes, reportCount: progressReportCount },
-          'Progress report sent',
-        );
-      } catch (err) {
-        logger.error({ err, group: group.name }, 'Failed to send progress report');
-      }
-    }, PROGRESS_REPORT_INTERVAL);
+        nudgeCount++;
+        const inputDir = path.join(DATA_DIR, 'ipc', group.folder, 'input');
+        fs.mkdirSync(inputDir, { recursive: true });
+        const nudgeFile = path.join(inputDir, `nudge-${Date.now()}.json`);
+
+        try {
+          fs.writeFileSync(
+            nudgeFile,
+            JSON.stringify({
+              type: 'follow_up',
+              text: '[系统提醒] 你已经静默超过5分钟。请用 send_message 工具向用户简要汇报当前进展（正在做什么、大概还需多久）。',
+            }),
+          );
+          // Reset so next nudge is SILENCE_NUDGE_INTERVAL later
+          lastActivityTime = Date.now();
+          logger.info(
+            { group: group.name, nudgeCount, silentMs },
+            'Silence nudge sent to agent',
+          );
+        } catch (err) {
+          logger.error({ err, group: group.name }, 'Failed to send silence nudge');
+        }
+      }, 30000); // Check every 30s
+    }
 
     container.on('close', (code) => {
       clearTimeout(timeout);
-      clearInterval(progressInterval);
+      if (silenceNudgeInterval) {
+        clearInterval(silenceNudgeInterval);
+      }
       const duration = Date.now() - startTime;
 
       if (timedOut) {
@@ -451,6 +463,30 @@ export async function runContainerAgent(
           error: `Container timed out after ${group.containerConfig?.timeout || CONTAINER_TIMEOUT}ms`,
         });
         return;
+      }
+
+      // Completion notification for long-running tasks (> 2 min, normal exit)
+      if (code === 0 && duration > 120000) {
+        const mins = Math.floor(duration / 60000);
+        const secs = Math.floor((duration % 60000) / 1000);
+        const completionMsg = `✅ 任务执行完毕（用时 ${mins}分${secs}秒）`;
+
+        const ipcDir = path.join(DATA_DIR, 'ipc', group.folder, 'messages');
+        fs.mkdirSync(ipcDir, { recursive: true });
+        const ipcFile = path.join(ipcDir, `completion-${Date.now()}.json`);
+        try {
+          fs.writeFileSync(
+            ipcFile,
+            JSON.stringify({
+              type: 'message',
+              chatJid: input.chatJid,
+              text: completionMsg,
+            }),
+          );
+          logger.info({ group: group.name, duration, mins, secs }, 'Completion notification sent');
+        } catch (err) {
+          logger.error({ err, group: group.name }, 'Failed to send completion notification');
+        }
       }
 
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');

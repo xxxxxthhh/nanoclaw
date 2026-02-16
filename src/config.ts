@@ -29,7 +29,11 @@ export const CONTAINER_TIMEOUT = parseInt(
 export const PROGRESS_REPORT_INTERVAL = parseInt(
   process.env.PROGRESS_REPORT_INTERVAL || '1800000',
   10,
-); // 30 minutes default
+); // 30 minutes default (legacy, unused)
+export const SILENCE_NUDGE_INTERVAL = parseInt(
+  process.env.SILENCE_NUDGE_INTERVAL || '300000',
+  10,
+); // 5 minutes default; 0 to disable
 export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
   process.env.CONTAINER_MAX_OUTPUT_SIZE || '10485760',
   10,
