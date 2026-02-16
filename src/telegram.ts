@@ -34,6 +34,8 @@ export class TelegramHandler {
   private readonly ERROR_WINDOW_MS = 60000; // 1 minute
   private restartTimer?: NodeJS.Timeout;
   private isRestarting = false;
+  private restartStartTime?: Date;
+  private readonly RESTART_TIMEOUT_MS = 30000; // 30 seconds max for restart operation
 
   constructor(token: string, authorizedUserId?: number) {
     this.token = token;
@@ -155,6 +157,15 @@ export class TelegramHandler {
     logger.info('Telegram bot handlers initialized');
   }
 
+  private async withTimeout<T>(promise: Promise<T>, timeoutMs: number, operation: string): Promise<T> {
+    return Promise.race([
+      promise,
+      new Promise<T>((_, reject) =>
+        setTimeout(() => reject(new Error(`${operation} timed out after ${timeoutMs}ms`)), timeoutMs)
+      )
+    ]);
+  }
+
   private handlePollingError(error: Error): void {
     const now = new Date();
     const errorCode = (error as any).code;
@@ -197,30 +208,47 @@ export class TelegramHandler {
   }
 
   public async restartPolling(): Promise<void> {
-    if (this.isRestarting) {
+    // Check if restart is stuck (taking too long)
+    if (this.isRestarting && this.restartStartTime) {
+      const elapsed = Date.now() - this.restartStartTime.getTime();
+      if (elapsed < this.RESTART_TIMEOUT_MS) {
+        logger.debug({ elapsedMs: elapsed }, 'Bot restart already in progress, skipping');
+        return;
+      }
+      // Force restart if stuck too long
+      logger.warn({ elapsedMs: elapsed }, 'Previous restart stuck, forcing new restart');
+      this.isRestarting = false;
+    } else if (this.isRestarting) {
       logger.debug('Bot restart already in progress, skipping');
       return;
     }
 
     this.isRestarting = true;
+    this.restartStartTime = new Date();
 
     try {
       logger.info('Stopping Telegram polling...');
-      await this.bot.stopPolling();
+      await this.withTimeout(this.bot.stopPolling(), 10000, 'stopPolling');
 
       // Wait a bit before restarting
       await new Promise(resolve => setTimeout(resolve, 2000));
 
       logger.info('Restarting Telegram polling...');
-      await this.bot.startPolling();
+      await this.withTimeout(this.bot.startPolling(), 15000, 'startPolling');
 
       // Reset error counter on successful restart
       this.pollingErrorCount = 0;
       this.lastPollingError = undefined;
+      this.isRestarting = false;
+      this.restartStartTime = undefined;
 
       logger.info('Telegram polling restarted successfully');
     } catch (err) {
       logger.error({ error: err }, 'Failed to restart Telegram polling');
+
+      // Reset flag immediately on error so retry can proceed
+      this.isRestarting = false;
+      this.restartStartTime = undefined;
 
       // Schedule another restart attempt
       if (this.restartTimer) {
@@ -228,11 +256,8 @@ export class TelegramHandler {
       }
       this.restartTimer = setTimeout(() => {
         logger.info('Retrying Telegram polling restart...');
-        this.isRestarting = false;
         this.restartPolling();
       }, 5000);
-    } finally {
-      this.isRestarting = false;
     }
   }
 
