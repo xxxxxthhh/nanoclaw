@@ -1145,25 +1145,76 @@ function ensureContainerSystemRunning(): void {
   }
 
   // Kill and clean up orphaned NanoClaw containers from previous runs
+  cleanupOrphanedContainers('startup');
+}
+
+/**
+ * Clean up orphaned NanoClaw containers (both running and stopped).
+ * Apple Container's --rm flag is unreliable when the parent process crashes
+ * or containers are killed via `container stop`. This function handles both
+ * states: stop running containers, then rm any that remain.
+ */
+function cleanupOrphanedContainers(reason: string): void {
   try {
     const output = execSync('container ls --format json', {
       stdio: ['pipe', 'pipe', 'pipe'],
       encoding: 'utf-8',
+      timeout: 15000,
     });
     const containers: { status: string; configuration: { id: string } }[] = JSON.parse(output || '[]');
-    const orphans = containers
-      .filter((c) => c.status === 'running' && c.configuration.id.startsWith('nanoclaw-'))
-      .map((c) => c.configuration.id);
-    for (const name of orphans) {
+    const nanoclaw = containers.filter(
+      (c) => c.configuration.id.startsWith('nanoclaw-'),
+    );
+
+    // Stop running containers (skip any tracked by the current queue)
+    const running = nanoclaw
+      .filter((c) => c.status === 'running')
+      .map((c) => c.configuration.id)
+      .filter((name) => !queue.isActiveContainer(name));
+
+    for (const name of running) {
       try {
-        execSync(`container stop ${name}`, { stdio: 'pipe' });
-      } catch { /* already stopped */ }
+        execSync(`container stop ${name}`, { stdio: 'pipe', timeout: 15000 });
+      } catch { /* already stopped or XPC timeout — rm will handle it */ }
     }
-    if (orphans.length > 0) {
-      logger.info({ count: orphans.length, names: orphans }, 'Stopped orphaned containers');
+
+    // Remove all stopped nanoclaw containers (including ones we just stopped)
+    const stopped = nanoclaw
+      .filter((c) => c.status === 'stopped')
+      .map((c) => c.configuration.id);
+
+    // Re-check after stopping — some may have transitioned to stopped
+    let newlyStopped: string[] = [];
+    if (running.length > 0) {
+      try {
+        const refreshed = execSync('container ls --format json', {
+          stdio: ['pipe', 'pipe', 'pipe'],
+          encoding: 'utf-8',
+          timeout: 15000,
+        });
+        const refreshedContainers: { status: string; configuration: { id: string } }[] = JSON.parse(refreshed || '[]');
+        newlyStopped = refreshedContainers
+          .filter((c) => c.status === 'stopped' && c.configuration.id.startsWith('nanoclaw-'))
+          .map((c) => c.configuration.id);
+      } catch { /* use original stopped list */ }
+    }
+
+    const toRemove = [...new Set([...stopped, ...newlyStopped])];
+    for (const name of toRemove) {
+      try {
+        execSync(`container rm ${name}`, { stdio: 'pipe', timeout: 10000 });
+      } catch { /* already removed */ }
+    }
+
+    const total = running.length + toRemove.length;
+    if (total > 0) {
+      logger.info(
+        { reason, stopped: running.length, removed: toRemove.length },
+        'Cleaned up orphaned containers',
+      );
     }
   } catch (err) {
-    logger.warn({ err }, 'Failed to clean up orphaned containers');
+    logger.warn({ err, reason }, 'Failed to clean up orphaned containers');
   }
 }
 
@@ -1241,13 +1292,24 @@ async function main(): Promise<void> {
   logger.info('Database initialized');
   loadState();
 
+  // Periodic container cleanup — catch orphans that accumulate during runtime
+  // (e.g. containers that outlive their parent task due to XPC timeouts)
+  const CLEANUP_INTERVAL = 10 * 60 * 1000; // 10 minutes
+  const cleanupTimer = setInterval(() => {
+    cleanupOrphanedContainers('periodic');
+  }, CLEANUP_INTERVAL);
+  cleanupTimer.unref(); // Don't prevent process exit
+
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
+    clearInterval(cleanupTimer);
     if (telegram) {
       await telegram.shutdown();
     }
     await queue.shutdown(10000);
+    // Clean up any containers that were detached during shutdown
+    cleanupOrphanedContainers('shutdown');
     process.exit(0);
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));

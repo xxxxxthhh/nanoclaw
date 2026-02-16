@@ -112,6 +112,19 @@ export class GroupQueue {
     this.runTask(groupJid, { id: taskId, groupJid, fn });
   }
 
+  /**
+   * Check if a container name is currently tracked as active by the queue.
+   * Used by orphan cleanup to avoid killing containers that are still in use.
+   */
+  isActiveContainer(containerName: string): boolean {
+    for (const state of this.groups.values()) {
+      if (state.active && state.containerName === containerName) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   registerProcess(groupJid: string, proc: ChildProcess, containerName: string, groupFolder?: string): void {
     const state = this.getGroup(groupJid);
     state.process = proc;
