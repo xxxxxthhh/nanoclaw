@@ -55,7 +55,7 @@ import { GroupQueue } from './group-queue.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { NewMessage, RegisteredGroup } from './types.js';
 import { TelegramIntegration } from './telegram-integration.js';
-import { logger } from './logger.js';
+import { libLogger, logger } from './logger.js';
 
 const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -850,10 +850,10 @@ async function connectWhatsApp(): Promise<void> {
   sock = makeWASocket({
     auth: {
       creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, logger),
+      keys: makeCacheableSignalKeyStore(state.keys, libLogger),
     },
     printQRInTerminal: false,
-    logger,
+    logger: libLogger,
     browser: ['NanoClaw', 'Chrome', '1.0.0'],
   });
 
