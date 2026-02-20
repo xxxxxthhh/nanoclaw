@@ -403,6 +403,8 @@ async function runAgent(
       }
     : undefined;
 
+  let spawnedContainerName: string | undefined;
+
   try {
     const output = await runContainerAgent(
       group,
@@ -415,7 +417,10 @@ async function runAgent(
         images,
         documents,
       },
-      (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder),
+      (proc, containerName) => {
+        spawnedContainerName = containerName;
+        queue.registerProcess(chatJid, proc, containerName, group.folder);
+      },
       wrappedOnOutput,
     );
 
@@ -436,6 +441,12 @@ async function runAgent(
   } catch (err) {
     logger.error({ group: group.name, err }, 'Agent error');
     return 'error';
+  } finally {
+    // Always unregister the container from the active set once it exits.
+    // This covers direct callers (Telegram) that bypass the queue's runForGroup.
+    if (spawnedContainerName) {
+      queue.unregisterContainer(spawnedContainerName);
+    }
   }
 }
 
@@ -1233,6 +1244,11 @@ async function connectTelegram(): Promise<void> {
     ? parseInt(process.env.TELEGRAM_MAIN_CHAT_ID, 10)
     : undefined;
 
+  // Track active Telegram containers to prevent concurrent spawns for the same chat.
+  // Unlike WhatsApp (which uses GroupQueue's state.active), Telegram messages bypass
+  // the queue and can trigger parallel runAgent calls from the bot event handler.
+  const activeTelegramGroups = new Set<string>();
+
   try {
     telegram = new TelegramIntegration(
       {
@@ -1258,19 +1274,60 @@ async function connectTelegram(): Promise<void> {
         const messageContent = content || (images ? '[Image]' : '');
         const prompt = `<messages>\n<message sender="User" time="${timestamp}">${messageContent}</message>\n</messages>`;
 
-        // Use streaming output - responses sent via sendMessage which routes to Telegram
-        const result = await runAgent(group, prompt, chatJid, async (output) => {
-          if (output.result) {
-            const raw = typeof output.result === 'string' ? output.result : JSON.stringify(output.result);
-            const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-            if (text) {
-              await sendMessage(chatJid, text);
-            }
+        // If a container is already running for this chat, forward the new message into
+        // it via IPC instead of spawning a parallel container. Mirrors WhatsApp's
+        // queue.sendMessage() path. Uses a local Set (not state.active) because Telegram
+        // bypasses GroupQueue's runForGroup and never sets state.active.
+        if (activeTelegramGroups.has(chatJid)) {
+          const inputDir = path.join(DATA_DIR, 'ipc', group.folder, 'input');
+          try {
+            fs.mkdirSync(inputDir, { recursive: true });
+            const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`;
+            const filepath = path.join(inputDir, filename);
+            const tempPath = `${filepath}.tmp`;
+            fs.writeFileSync(tempPath, JSON.stringify({ type: 'message', text: prompt }));
+            fs.renameSync(tempPath, filepath);
+            logger.debug({ chatJid, group: group.name }, 'Telegram follow-up forwarded to active container');
+          } catch (err) {
+            logger.error({ err, chatJid }, 'Failed to forward Telegram follow-up to active container');
           }
-        }, images, documents);
+          return null;
+        }
 
-        // Response already sent via streaming callback, return null
-        return null;
+        activeTelegramGroups.add(chatJid);
+        // Idle timer declared outside try so finally can clear it on error paths too.
+        let idleTimer: ReturnType<typeof setTimeout> | null = null;
+        try {
+          // Idle timer: signal container to exit after IDLE_TIMEOUT ms with no output.
+          // Mirrors the WhatsApp processing path. Without this, the container's
+          // waitForIpcMessage() loop runs indefinitely after the agent finishes.
+          const resetIdleTimer = () => {
+            if (idleTimer) clearTimeout(idleTimer);
+            idleTimer = setTimeout(() => {
+              logger.debug({ group: group.name }, 'Telegram idle timeout, closing container stdin');
+              queue.closeStdin(chatJid);
+            }, IDLE_TIMEOUT);
+          };
+          resetIdleTimer(); // start timer immediately (covers cases with no output at all)
+
+          // Use streaming output - responses sent via sendMessage which routes to Telegram
+          await runAgent(group, prompt, chatJid, async (output) => {
+            if (output.result) {
+              resetIdleTimer(); // keep container alive while results are flowing
+              const raw = typeof output.result === 'string' ? output.result : JSON.stringify(output.result);
+              const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+              if (text) {
+                await sendMessage(chatJid, text);
+              }
+            }
+          }, images, documents);
+
+          // Response already sent via streaming callback, return null
+          return null;
+        } finally {
+          if (idleTimer) clearTimeout(idleTimer);
+          activeTelegramGroups.delete(chatJid);
+        }
       },
       // Response sender
       sendMessage,

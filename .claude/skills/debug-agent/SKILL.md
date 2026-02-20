@@ -161,8 +161,7 @@ echo "=== Model Configuration ==="
 MODEL=$(grep ANTHROPIC_MODEL ~/Documents/nanoclaw/.env | cut -d'=' -f2)
 echo "Current model: $MODEL"
 
-# Note: claude-opus-4-6 is slower but more thorough
-# If tasks are timing out, consider switching to claude-sonnet-4-5
+# Model is set via ANTHROPIC_MODEL in .env (currently claude-opus-4-6)
 ```
 
 ### Step 6: Real-Time Log Streaming
@@ -352,7 +351,7 @@ TIMEOUT_MIN=$((TIMEOUT / 60000))
 echo "   Timeout: ${TIMEOUT_MIN} minutes"
 
 MODEL=$(grep ANTHROPIC_MODEL ~/Documents/nanoclaw/.env 2>/dev/null | cut -d'=' -f2)
-echo "   Model: ${MODEL:-claude-sonnet-4-5 (default)}"
+echo "   Model: ${MODEL:-claude-opus-4-6 (default)}"
 
 echo ""
 

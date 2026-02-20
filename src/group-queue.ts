@@ -31,6 +31,10 @@ export class GroupQueue {
   private processMessagesFn: ((groupJid: string) => Promise<boolean>) | null =
     null;
   private shuttingDown = false;
+  // Global set of all currently active container names.
+  // Replaces per-group containerName checks to avoid overwrite issues when
+  // multiple containers run for the same JID (e.g. Telegram + scheduled task).
+  private activeContainerSet = new Set<string>();
 
   private getGroup(groupJid: string): GroupState {
     let state = this.groups.get(groupJid);
@@ -115,14 +119,11 @@ export class GroupQueue {
   /**
    * Check if a container name is currently tracked as active by the queue.
    * Used by orphan cleanup to avoid killing containers that are still in use.
+   * Uses a global Set to avoid per-group overwrite issues (e.g. two containers
+   * running for the same JID when a scheduled task fires mid-conversation).
    */
   isActiveContainer(containerName: string): boolean {
-    for (const state of this.groups.values()) {
-      if (state.active && state.containerName === containerName) {
-        return true;
-      }
-    }
-    return false;
+    return this.activeContainerSet.has(containerName);
   }
 
   registerProcess(groupJid: string, proc: ChildProcess, containerName: string, groupFolder?: string): void {
@@ -130,6 +131,22 @@ export class GroupQueue {
     state.process = proc;
     state.containerName = containerName;
     if (groupFolder) state.groupFolder = groupFolder;
+    this.activeContainerSet.add(containerName);
+  }
+
+  /**
+   * Remove a container from the active set when it exits.
+   * Must be called by any code path that spawns containers directly
+   * (e.g. Telegram handler which bypasses the queue's runForGroup).
+   */
+  unregisterContainer(containerName: string): void {
+    this.activeContainerSet.delete(containerName);
+    // Also clear from per-group state if it still references this container.
+    for (const state of this.groups.values()) {
+      if (state.containerName === containerName) {
+        state.containerName = null;
+      }
+    }
   }
 
   /**
@@ -159,7 +176,9 @@ export class GroupQueue {
    */
   closeStdin(groupJid: string): void {
     const state = this.getGroup(groupJid);
-    if (!state.active || !state.groupFolder) return;
+    // Don't require state.active — Telegram messages bypass the queue's runForGroup
+    // and never set state.active, but the container still needs to be closed.
+    if (!state.groupFolder) return;
 
     const inputDir = path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
     try {
@@ -199,7 +218,10 @@ export class GroupQueue {
     } finally {
       state.active = false;
       state.process = null;
-      state.containerName = null;
+      if (state.containerName) {
+        this.activeContainerSet.delete(state.containerName);
+        state.containerName = null;
+      }
       state.groupFolder = null;
       this.activeCount--;
       this.drainGroup(groupJid);
@@ -223,7 +245,10 @@ export class GroupQueue {
     } finally {
       state.active = false;
       state.process = null;
-      state.containerName = null;
+      if (state.containerName) {
+        this.activeContainerSet.delete(state.containerName);
+        state.containerName = null;
+      }
       state.groupFolder = null;
       this.activeCount--;
       this.drainGroup(groupJid);
