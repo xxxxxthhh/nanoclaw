@@ -16,7 +16,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { query, HookCallback, PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
+import { query, HookCallback, PreCompactHookInput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
 
 interface ContainerInput {
@@ -26,6 +26,7 @@ interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  secrets?: Record<string, string>;
   images?: Array<{ data: string; mediaType: 'image/jpeg' | 'image/png' }>;
   documents?: Array<{ data: string; filename: string; mimetype?: string }>;
 }
@@ -197,6 +198,30 @@ function createPreCompactHook(): HookCallback {
   };
 }
 
+// Secrets to strip from Bash tool subprocess environments.
+// These are needed by claude-code for API auth but should never
+// be visible to commands the agent runs.
+const SECRET_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'];
+
+function createSanitizeBashHook(): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const preInput = input as PreToolUseHookInput;
+    const command = (preInput.tool_input as { command?: string })?.command;
+    if (!command) return {};
+
+    const unsetPrefix = `unset ${SECRET_ENV_VARS.join(' ')} 2>/dev/null; `;
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        updatedInput: {
+          ...(preInput.tool_input as Record<string, unknown>),
+          command: unsetPrefix + command,
+        },
+      },
+    };
+  };
+}
+
 function sanitizeFilename(summary: string): string {
   return summary
     .toLowerCase()
@@ -347,6 +372,7 @@ async function runQuery(
   sessionId: string | undefined,
   mcpServerPath: string,
   containerInput: ContainerInput,
+  sdkEnv: Record<string, string | undefined>,
   resumeAt?: string,
 ): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
   const stream = new MessageStream();
@@ -404,6 +430,7 @@ async function runQuery(
         'NotebookEdit',
         'mcp__nanoclaw__*'
       ],
+      env: sdkEnv,
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
       settingSources: ['project', 'user'],
@@ -419,7 +446,8 @@ async function runQuery(
         },
       },
       hooks: {
-        PreCompact: [{ hooks: [createPreCompactHook()] }]
+        PreCompact: [{ hooks: [createPreCompactHook()] }],
+        PreToolUse: [{ matcher: 'Bash', hooks: [createSanitizeBashHook()] }],
       },
     }
   })) {
@@ -464,6 +492,8 @@ async function main(): Promise<void> {
   try {
     const stdinData = await readStdin();
     containerInput = JSON.parse(stdinData);
+    // Delete the temp file the entrypoint wrote — it contains secrets
+    try { fs.unlinkSync('/tmp/input.json'); } catch { /* may not exist */ }
     log(`Received input for group: ${containerInput.groupFolder}`);
   } catch (err) {
     writeOutput({
@@ -476,6 +506,13 @@ async function main(): Promise<void> {
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const mcpServerPath = path.join(__dirname, 'ipc-mcp-stdio.js');
+
+  // Build SDK env: merge secrets into process.env for the SDK only.
+  // Secrets never touch process.env itself, so Bash subprocesses can't see them.
+  const sdkEnv: Record<string, string | undefined> = { ...process.env };
+  for (const [key, value] of Object.entries(containerInput.secrets || {})) {
+    sdkEnv[key] = value;
+  }
 
   let sessionId = containerInput.sessionId;
   fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
@@ -531,7 +568,7 @@ async function main(): Promise<void> {
     while (true) {
       log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
 
-      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, resumeAt);
+      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
       }

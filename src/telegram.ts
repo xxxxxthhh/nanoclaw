@@ -285,6 +285,54 @@ export class TelegramHandler {
     }
   }
 
+  /**
+   * Send a streaming draft message (Bot API 9.3+).
+   * Shows partial content to the user while the response is being generated.
+   * Returns true on success; throws with description on failure.
+   */
+  public async sendMessageDraft(chatId: number, text: string): Promise<void> {
+    const url = `https://api.telegram.org/bot${this.token}/sendMessageDraft`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text })
+    });
+    const data = await response.json() as { ok: boolean; description?: string };
+    if (!data.ok) {
+      const err = new Error(data.description || 'sendMessageDraft failed');
+      (err as any).telegramDescription = data.description;
+      throw err;
+    }
+  }
+
+  /**
+   * Send a message and return the full Message object (with message_id).
+   * Used as a fallback when sendMessageDraft is not supported.
+   */
+  public async sendMessageWithId(chatId: number, text: string, options?: { parse_mode?: 'Markdown' | 'HTML' }): Promise<TelegramBot.Message> {
+    return await this.bot.sendMessage(chatId, text, {
+      parse_mode: options?.parse_mode
+    });
+  }
+
+  /**
+   * Edit an existing message. Used for the streaming fallback (editMessageText pattern).
+   * Silently ignores "message is not modified" errors.
+   */
+  public async editMessageText(chatId: number, messageId: number, text: string): Promise<void> {
+    try {
+      await this.bot.editMessageText(text, {
+        chat_id: chatId,
+        message_id: messageId
+      });
+    } catch (err: any) {
+      // Ignore harmless "message is not modified" (same content sent twice)
+      if (!err?.message?.includes('message is not modified')) {
+        logger.debug({ chatId, messageId, error: err }, 'editMessageText failed');
+      }
+    }
+  }
+
   public async sendTypingAction(chatId: number): Promise<void> {
     try {
       await this.bot.sendChatAction(chatId, 'typing');

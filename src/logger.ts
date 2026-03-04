@@ -6,7 +6,7 @@ export const logger = pino({
 });
 
 /**
- * Reduced-noise logger for third-party libraries (Baileys, etc.)
+ * Reduced-noise logger for third-party libraries.
  * Only logs warnings and above to prevent protocol-level log spam.
  * Note: level must be set via options param, not bindings.
  */

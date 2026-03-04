@@ -47,6 +47,7 @@ export class TelegramIntegration {
   private lastMessageTime?: Date;
   private readonly HEALTH_CHECK_INTERVAL_MS = 300000; // 5 minutes
   private readonly MAX_SILENCE_MS = 3600000; // 1 hour
+  private activeMessages: Map<number, number> = new Map(); // chatId -> messageId
 
   constructor(
     config: TelegramConfig,
@@ -117,9 +118,12 @@ export class TelegramIntegration {
         const chatName = msg.username ? `@${msg.username}` : chatJid;
         storeChatMetadata(chatJid, new Date(msg.timestamp).toISOString(), chatName);
 
+        // Clear active message tracking when user sends new message
+        this.activeMessages.delete(msg.chatId);
+
         // Do NOT store Telegram messages to database to prevent duplicate processing
         // Telegram messages are processed in real-time with images passed directly to the agent
-        // WhatsApp uses database + polling, but Telegram uses direct event-driven processing
+        // Telegram uses direct event-driven processing (no database polling)
 
         // Check if this is main chat (private chat with authorized user)
         const isMainChat = this.mainChatId ? msg.chatId === this.mainChatId : msg.chatId > 0;
@@ -247,6 +251,10 @@ ${isMainChat ? 'Just send any message!' : `Mention @${ASSISTANT_NAME} in your me
     return this.handler.getBot();
   }
 
+  public getHandler(): TelegramHandler {
+    return this.handler;
+  }
+
   /**
    * Send a message via Telegram (called from IPC or other parts of the system)
    */
@@ -261,6 +269,37 @@ ${isMainChat ? 'Just send any message!' : `Mention @${ASSISTANT_NAME} in your me
       throw new Error(`Invalid chat ID in JID: ${chatJid}`);
     }
 
-    await this.handler.sendMessage(chatId, text);
+    // Check if this is a completion notification - send as new message
+    const isCompletionMsg = text.includes('✅ 任务执行完毕') || text.includes('✅ Task completed');
+
+    if (isCompletionMsg) {
+      // Clear tracking and send as new message
+      this.activeMessages.delete(chatId);
+      const msg = await this.handler.sendMessageWithId(chatId, text);
+      return;
+    }
+
+    // Check if we have an active message to edit
+    const existingMessageId = this.activeMessages.get(chatId);
+
+    if (existingMessageId) {
+      // Edit existing message
+      await this.handler.editMessageText(chatId, existingMessageId, text);
+    } else {
+      // Send new message and track it
+      const msg = await this.handler.sendMessageWithId(chatId, text);
+      this.activeMessages.set(chatId, msg.message_id);
+    }
+  }
+
+  /**
+   * Clear active message tracking for a chat (call when task completes)
+   */
+  public clearActiveMessage(chatJid: string): void {
+    if (!chatJid.startsWith('telegram:')) return;
+    const chatId = parseInt(chatJid.replace('telegram:', ''), 10);
+    if (!isNaN(chatId)) {
+      this.activeMessages.delete(chatId);
+    }
   }
 }
