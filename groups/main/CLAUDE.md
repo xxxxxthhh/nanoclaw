@@ -192,15 +192,25 @@ Read the CLAUDE.md files in each folder for role-specific context and workflows.
 - Obsidian-based workflow with Kanban boards (PIPELINE.md, PORTFOLIO.md)
 
 ---
-## WhatsApp Formatting
+## Message Formatting
 
-Do NOT use markdown headings (##) in WhatsApp messages. Only use:
+Do NOT use markdown headings (##) in messages. Only use:
 - *Bold* (asterisks)
 - _Italic_ (underscores)
 - • Bullets (bullet points)
 - ```Code blocks``` (triple backticks)
 
-Keep messages clean and readable for WhatsApp.
+Keep messages clean and readable.
+
+## Communication
+
+Your output is sent to the user. You also have `mcp__nanoclaw__send_message` which sends a message immediately while you're still working.
+
+If you've already sent the key information via `send_message`, wrap your final output in `<internal>` tags to avoid sending a redundant confirmation:
+
+```
+<internal>Already sent the summary above.</internal>
+```
 
 ---
 
@@ -244,7 +254,7 @@ Available groups are provided in `/workspace/ipc/available_groups.json`:
 }
 ```
 
-Groups are ordered by most recent activity. The list is synced from WhatsApp daily.
+Groups are ordered by most recent activity. The list is synced daily.
 
 If a group the user mentions isn't in the list, request a fresh sync:
 
@@ -282,7 +292,7 @@ Groups are registered in `/workspace/project/data/registered_groups.json`:
 ```
 
 Fields:
-- **Key**: The WhatsApp JID (unique identifier for the chat)
+- **Key**: The chat JID (unique identifier for the chat)
 - **name**: Display name for the group
 - **folder**: Folder name under `groups/` for this group's files and memory
 - **trigger**: The trigger word (usually same as global, but could differ)
